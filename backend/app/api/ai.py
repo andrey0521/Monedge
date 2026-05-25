@@ -46,20 +46,55 @@ async def summary(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    import calendar
+    from sqlalchemy import select, func
+    from app.models.transaction import Transaction
+    from app.models.category import Category
+
     today = date.today()
     income, expenses = await get_monthly_totals(db, current_user.id, today.year, today.month)
+    prev_month = today.replace(day=1) - timedelta(days=1)
+    _, prev_expenses = await get_monthly_totals(db, current_user.id, prev_month.year, prev_month.month)
+
     accounts = await account_service.get_accounts(db, current_user.id)
-    total_balance = sum(Decimal(str(a.balance)) for a in accounts)
+    total_balance = sum(Decimal(str(a.balance)) for a in accounts if a.type != "credit")
     budgets = await budget_service.get_budgets(db, current_user.id)
     goals = await goal_service.get_goals(db, current_user.id)
+
+    # Top categorías de gasto del mes actual
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    start = date(today.year, today.month, 1)
+    end = date(today.year, today.month, last_day)
+    res = await db.execute(
+        select(Category.name, func.sum(Transaction.amount).label("total"))
+        .join(Transaction, Transaction.category_id == Category.id)
+        .where(
+            Transaction.user_id == current_user.id,
+            Transaction.type == "expense",
+            Transaction.date >= start,
+            Transaction.date <= end,
+        )
+        .group_by(Category.name)
+        .order_by(func.sum(Transaction.amount).desc())
+        .limit(4)
+    )
+    top_cats = [{"name": row[0], "total": float(row[1])} for row in res.all()]
+
+    savings_rate = round((float(income) - float(expenses)) / float(income) * 100, 1) if income > 0 else 0
+    exp_delta_pct = round((float(expenses) - float(prev_expenses)) / float(prev_expenses) * 100, 1) if prev_expenses > 0 else None
 
     context = {
         "name": current_user.full_name.split()[0],
         "total_balance": float(total_balance),
         "monthly_income": float(income),
         "monthly_expenses": float(expenses),
-        "budgets": [{"name": b.name, "amount": float(b.amount), "spent": float(b.spent)} for b in budgets],
-        "goals": [{"name": g.name, "target_amount": float(g.target_amount), "saved_amount": float(g.saved_amount)} for g in goals],
+        "savings_rate": savings_rate,
+        "exp_delta_pct": exp_delta_pct,
+        "days_elapsed": today.day,
+        "days_in_month": last_day,
+        "top_categories": top_cats,
+        "budgets": [{"name": b.name, "amount": float(b.amount), "spent": float(b.spent)} for b in budgets[:3]],
+        "goals": [{"name": g.name, "target_amount": float(g.target_amount), "saved_amount": float(g.saved_amount)} for g in goals[:3]],
     }
     text = await ai_service.generate_summary(context)
     return {"text": text}

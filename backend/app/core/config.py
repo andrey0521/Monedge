@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     GOOGLE_AI_API_KEY: str = ""
     GEMMA_MODEL: str = "gemini-2.5-flash"
     # Tokens de pensamiento para el Laboratorio IA (0 = desactivado, máx 24576 para Flash)
-    ANALYZE_THINKING_BUDGET: int = 8000
+    ANALYZE_THINKING_BUDGET: int = 1024
 
     model_config = {
         "env_file": str(Path(__file__).parent.parent.parent / ".env"),

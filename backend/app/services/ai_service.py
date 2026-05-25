@@ -6,6 +6,7 @@ import json
 import re
 
 _client: genai.Client | None = None
+_cat_cache: dict[str, dict] = {}  # cache de categorizaciones: key → {category_name, emoji, category_id}
 
 
 def _get_client() -> genai.Client:
@@ -22,6 +23,13 @@ async def categorize_transaction(
 ) -> dict:
     if not settings.GOOGLE_AI_API_KEY:
         return {"category_name": "Otros", "emoji": "📦", "category_id": None}
+
+    cache_key = description.strip().lower()
+    if cache_key in _cat_cache:
+        cached = _cat_cache[cache_key]
+        matched = next((c for c in categories if str(c["id"]) == cached.get("category_id")), None)
+        if matched:
+            return cached
 
     cat_list = "\n".join(
         f"- {c['name']} {c['emoji'] or ''}" + (f": {c['description']}" if c.get("description") else "")
@@ -51,6 +59,7 @@ async def categorize_transaction(
             matched = next((c for c in categories if c["name"] == data.get("category_name")), None)
             if matched:
                 data["category_id"] = str(matched["id"])
+            _cat_cache[cache_key] = data
             return data
     except Exception:
         pass
@@ -86,40 +95,54 @@ async def generate_summary(user_context: dict) -> str:
     if not settings.GOOGLE_AI_API_KEY:
         return "Activa tu API key de Google AI Studio para obtener el resumen con IA."
 
-    name = user_context.get("name", "")
-    total_balance = user_context.get("total_balance", 0)
-    monthly_income = user_context.get("monthly_income", 0)
+    name             = user_context.get("name", "")
+    monthly_income   = user_context.get("monthly_income", 0)
     monthly_expenses = user_context.get("monthly_expenses", 0)
-    budgets = user_context.get("budgets", [])
-    goals = user_context.get("goals", [])
+    savings_rate     = user_context.get("savings_rate", 0)
+    exp_delta_pct    = user_context.get("exp_delta_pct")       # None si no hay mes anterior
+    days_elapsed     = user_context.get("days_elapsed", 1)
+    days_in_month    = user_context.get("days_in_month", 30)
+    top_cats         = user_context.get("top_categories", [])
+    budgets          = user_context.get("budgets", [])
+    goals            = user_context.get("goals", [])
 
-    budget_text = ""
-    for b in budgets[:3]:
-        pct = (float(b.get("spent", 0)) / float(b.get("amount", 1))) * 100 if b.get("amount") else 0
-        budget_text += f"- {b['name']}: {pct:.0f}% usado\n"
+    has_data = monthly_income > 0 or monthly_expenses > 0
 
-    goal_text = ""
-    for g in goals[:3]:
-        pct = (float(g.get("saved_amount", 0)) / float(g.get("target_amount", 1))) * 100 if g.get("target_amount") else 0
-        goal_text += f"- {g['name']}: {pct:.0f}% completado\n"
-
-    has_data = total_balance > 0 or monthly_income > 0 or monthly_expenses > 0
-
-    prompt = (
-        f"Eres Monedge, un asistente financiero personal. "
-        f"Escribe en español 1-2 oraciones de resumen para {name}.\n\n"
-        f"Datos del mes:\n"
-        f"- Balance total: ${total_balance:,.0f}\n"
-        f"- Ingresos: ${monthly_income:,.0f}\n"
-        f"- Gastos: ${monthly_expenses:,.0f}\n"
-        f"Presupuestos:\n{budget_text or 'Sin presupuestos activos.'}\n"
-        f"Metas:\n{goal_text or 'Sin metas activas.'}\n\n"
-        + (
-            "Describe la situación actual con números específicos. Sin frases genéricas."
-            if has_data else
-            "El usuario aún no tiene movimientos registrados este mes. Dile en 1 oración qué puede hacer para empezar a usar Monedge. Sin frases motivacionales genéricas."
+    if not has_data:
+        prompt = (
+            f"Eres Monedge. {name} no tiene movimientos este mes. "
+            f"En 1 oración directa dile qué registrar primero. Sin motivación genérica."
         )
-    )
+    else:
+        cat_text = "\n".join(f"  · {c['name']}: ${c['total']:,.0f}" for c in top_cats) or "  · Sin desglose disponible"
+        budget_lines = []
+        for b in budgets:
+            pct = (b.get("spent", 0) / b.get("amount", 1)) * 100 if b.get("amount") else 0
+            budget_lines.append(f"  · {b['name']}: {pct:.0f}% de ${b.get('amount',0):,.0f}")
+        goal_lines = []
+        for g in goals:
+            pct = (g.get("saved_amount", 0) / g.get("target_amount", 1)) * 100 if g.get("target_amount") else 0
+            goal_lines.append(f"  · {g['name']}: {pct:.0f}% completado")
+
+        delta_line = ""
+        if exp_delta_pct is not None:
+            direction = "más" if exp_delta_pct > 0 else "menos"
+            delta_line = f"- Gastos vs mes anterior: {abs(exp_delta_pct):.1f}% {direction}\n"
+
+        prompt = (
+            f"Eres Monedge. Escribe exactamente 2 oraciones en español para {name}.\n\n"
+            f"Datos del mes ({days_elapsed} de {days_in_month} días transcurridos):\n"
+            f"- Ingresos: ${monthly_income:,.0f} | Gastos: ${monthly_expenses:,.0f} | Ahorro: {savings_rate:.1f}%\n"
+            f"{delta_line}"
+            f"- Top gastos:\n{cat_text}\n"
+            f"- Presupuestos:\n{chr(10).join(budget_lines) or '  · Ninguno'}\n"
+            f"- Metas:\n{chr(10).join(goal_lines) or '  · Ninguna'}\n\n"
+            f"Reglas estrictas:\n"
+            f"1. Primera oración: menciona el gasto real en MÍN. una categoría específica y el % de ahorro.\n"
+            f"2. Segunda oración: señala algo concreto — un presupuesto en riesgo, una meta próxima, "
+            f"   o la tendencia vs mes anterior. Si no hay nada notable, proyecta cuánto se gastará al cierre del mes.\n"
+            f"3. Nunca uses frases como 'buen trabajo', 'sigue así', 'es importante'. Solo hechos y números."
+        )
 
     try:
         client = _get_client()
