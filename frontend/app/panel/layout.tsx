@@ -20,7 +20,7 @@ import {
   Contrast,
   Tag,
 } from "lucide-react";
-import { getMe, logout } from "@/lib/api";
+import { getMe, logout, clearCache } from "@/lib/api";
 import type { User as UserType } from "@/lib/types";
 
 const menuItems = [
@@ -132,6 +132,7 @@ export default function PanelLayout({
 
   async function handleLogout() {
     await logout();
+    clearCache();
     router.push("/login");
   }
 

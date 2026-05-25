@@ -4,7 +4,37 @@ import type {
 
 const API = "http://localhost:8000";
 
+// ─── Cache en memoria ───────────────────────────────────────────────────────
+const _cache = new Map<string, { data: unknown; ts: number }>();
+const TTL: Record<string, number> = {
+  "/auth/me":    5 * 60_000, // 5 min — perfil rara vez cambia
+  "/categories": 2 * 60_000, // 2 min — categorías estables
+};
+const DEFAULT_TTL = 30_000; // 30 s para todo lo demás
+
+function cacheTTL(path: string) {
+  for (const prefix of Object.keys(TTL)) if (path.startsWith(prefix)) return TTL[prefix];
+  return DEFAULT_TTL;
+}
+
+function bustCache(mutatedPath: string) {
+  // invalida el recurso base + dashboard (casi toda mutación lo afecta)
+  const base = "/" + mutatedPath.split("/")[1];
+  for (const key of _cache.keys()) if (key.startsWith(base)) _cache.delete(key);
+  _cache.delete("/dashboard");
+}
+
+export function clearCache() { _cache.clear(); }
+// ───────────────────────────────────────────────────────────────────────────
+
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
+  const method = (options?.method ?? "GET").toUpperCase();
+
+  if (method === "GET") {
+    const hit = _cache.get(path);
+    if (hit && Date.now() - hit.ts < cacheTTL(path)) return hit.data as T;
+  }
+
   const res = await fetch(`${API}${path}`, {
     credentials: "include",
     headers: { "Content-Type": "application/json" },
@@ -18,8 +48,18 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
       : detail || "Error en la petición";
     throw new Error(msg);
   }
-  if (res.status === 204) return undefined as T;
-  return res.json();
+  if (res.status === 204) {
+    if (method !== "GET") bustCache(path);
+    return undefined as T;
+  }
+
+  const data = await res.json();
+  if (method === "GET") {
+    _cache.set(path, { data, ts: Date.now() });
+  } else {
+    bustCache(path);
+  }
+  return data as T;
 }
 
 // Auth
